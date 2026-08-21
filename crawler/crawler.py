@@ -428,8 +428,6 @@ def normalize_url(url: str) -> str | None:
     suffix = Path(path).suffix.lower()
     if suffix in SKIP_EXTENSIONS:
         return None
-    if path != "/" and path.endswith("/"):
-        path = path.rstrip("/")
     host = str(parsed.netloc).lower()
     query = str(parsed.query)
     return urlunparse((str(parsed.scheme), host, path, "", query, ""))

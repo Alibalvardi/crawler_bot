@@ -4,8 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from crawler import crawl
-from chunker import chunk_crawl_result, save_chunks
+from chunker.chunker import chunk_crawl_result, save_chunks
 
 
 def parse_args() -> argparse.Namespace:
