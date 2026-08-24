@@ -11,6 +11,7 @@ import httpx
 import numpy as np
 from openai import OpenAI
 from sympy import true
+from torch.version import cuda
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ def _embed_texts_local(
         show_progress: bool,
 ) -> np.ndarray:
     logger.info("loading local embedding model: %s", DEFAULT_LOCAL_MODEL)
-    model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=true)
+    model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=true,device="cuda")
 
     logger.info("embedding %d texts locally (batch_size=%d)", len(texts), batch_size)
     embeddings = model.encode(
@@ -91,7 +92,7 @@ def _embed_texts_local(
         batch_size=batch_size,
         show_progress_bar=show_progress,
         convert_to_numpy=True,
-        normalize_embeddings=True,  # برای cosine similarity بهتره بردارها نرمال شده باشند
+        normalize_embeddings=True,
     )
     return embeddings
 
@@ -100,7 +101,7 @@ def _embed_texts_gemini(
         texts: list[str],
         *,
         show_progress: bool,
-        batch_size: int = 20,  # سقف batchEmbedContents در حال حاضر ۱۰۰ است؛ ۲۰ محافظه‌کارانه و امن است
+        batch_size: int = 20,
         max_retries: int = 3,
 ) -> np.ndarray:
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -147,7 +148,6 @@ def _embed_texts_gemini(
                 logger.info("gemini embedded %d/%d", min(i + batch_size, len(texts)), len(texts))
 
     embeddings = np.array(all_vectors, dtype="float32")
-    # نرمال‌سازی برای هماهنگی با خروجی backend محلی (که normalize_embeddings=True دارد)
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     return embeddings / norms
@@ -228,20 +228,13 @@ def embed_chunks(
         chunks: list[dict],
         *,
         backend: str = "local",
-        model_name: str | None = None,
         batch_size: int = 32,
         show_progress: bool = True,
 ) -> np.ndarray:
-    """متن هر chunk را با backend انتخابی به بردار تبدیل می‌کند.
-
-    خروجی یک آرایه‌ی numpy به شکل (تعداد chunk, ابعاد بردار) است که
-    ترتیبش دقیقاً با ترتیب لیست chunks یکی است.
-    """
     texts = [chunk["text"] for chunk in chunks]
     return embed_texts(
         texts,
         backend=backend,
-        model_name=model_name,
         batch_size=batch_size,
         show_progress=show_progress,
     )
@@ -252,8 +245,6 @@ def save_embeddings(
         embeddings: np.ndarray,
         output_dir: str | Path,
 ) -> tuple[Path, Path]:
-    """بردارها را در یک فایل npy و متادیتای هر chunk را در یک فایل jsonl کنارش ذخیره می‌کند.
-    این دو فایل با هم یک به یک (بر اساس ایندکس ردیف) مطابقت دارند."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -290,10 +281,9 @@ if __name__ == "__main__":
     embeddings = embed_chunks(
         chunks,
         backend=args.backend,
-        model_name=args.model,
         batch_size=args.batch_size,
     )
-    # پوشه‌ی خروجی جدا برای هر backend، تا نتایج local و gemini با هم قاطی نشوند
+
     out_dir = Path(args.output_dir)
     vectors_path, metadata_path = save_embeddings(chunks, embeddings, out_dir)
 

@@ -152,7 +152,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Chunk crawled pages into overlapping text pieces.")
     parser.add_argument("crawl_json", help="path to crawl output JSON (from crawler.py)")
-    parser.add_argument("-o", "--output", default="chunks.jsonl", help="output JSONL path")
+    parser.add_argument("-o", "--output", default="data/chunks.jsonl", help="output JSONL path")
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--chunk-overlap", type=int, default=50)
     args = parser.parse_args()

@@ -87,7 +87,13 @@ def retrieve(
     backend: str = "local",
     persist_dir: str | Path = DEFAULT_PERSIST_DIR,
     top_k: int = 5,
+    distance_threshold: float | None = None,
 ) -> list[dict]:
+    if top_k <= 0:
+        raise ValueError("top_k باید بزرگ‌تر از صفر باشد.")
+    if distance_threshold is not None and distance_threshold < 0:
+        raise ValueError("distance_threshold نمی‌تواند منفی باشد.")
+
     query_embedding = embed_texts(
         [query],
         backend=backend,
@@ -115,6 +121,8 @@ def retrieve(
         results["distances"][0],
         results["ids"][0],
     ):
+        if distance_threshold is not None and dist > distance_threshold:
+            continue
         hits.append(
             {
                 "chunk_id": chunk_id,
@@ -146,6 +154,12 @@ if __name__ == "__main__":
     query_p.add_argument("--backend", choices=["local", "gemini"], default="local")
     query_p.add_argument("--persist-dir", default=DEFAULT_PERSIST_DIR)
     query_p.add_argument("--top-k", type=int, default=5)
+    query_p.add_argument(
+        "--distance-threshold",
+        type=float,
+        default=None,
+        help="حداکثر فاصله‌ی قابل‌قبول؛ فاصله‌ی بیشتر یعنی عدم وجود اطلاعات مرتبط",
+    )
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -166,8 +180,12 @@ if __name__ == "__main__":
             backend=args.backend,
             persist_dir=args.persist_dir,
             top_k=args.top_k,
+            distance_threshold=args.distance_threshold,
         )
-        print(f"\n{len(hits)} نتیجه برای: {args.query_text!r}\n")
-        for i, hit in enumerate(hits, 1):
-            print(f"{i}. [{hit['distance']:.4f}] {hit['title']} ({hit['url']})")
-            print(f"   {hit['text']}...\n")
+        if not hits:
+            print(f"\nاطلاعات مرتبطی برای {args.query_text!r} در این سایت وجود ندارد.\n")
+        else:
+            print(f"\n{len(hits)} نتیجه برای: {args.query_text!r}\n")
+            for i, hit in enumerate(hits, 1):
+                print(f"{i}. [{hit['distance']:.4f}] {hit['title']} ({hit['url']})")
+                print(f"   {hit['text']}...\n")
