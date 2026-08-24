@@ -5,41 +5,7 @@ import logging
 from pathlib import Path
 
 from chunker import chunk_crawl_result, save_chunks
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="مرحله ۱: دریافت مطالب یک وب‌سایت (crawl همان دامنه)",
-    )
-    parser.add_argument("url", nargs="?", help="آدرس یا دامنه وب‌سایت، مثلاً example.com")
-    parser.add_argument("--max-pages", type=int, default=500, help="حداکثر تعداد صفحات")
-    parser.add_argument("--max-depth", type=int, default=5, help="حداکثر عمق لینک‌ها")
-    parser.add_argument("--concurrency", type=int, default=16, help="تعداد درخواست همزمان")
-    parser.add_argument("--delay", type=float, default=0.0, help="وقفه بین درخواست‌های هر worker (ثانیه)")
-    parser.add_argument("--retries", type=int, default=2, help="چند بار URLهای خطا را دوباره امتحان کند")
-    parser.add_argument(
-        "--retry-errors",
-        action="store_true",
-        help="به‌جای crawl از اول، فقط خطاهای فایل خروجی را دوباره بگیرد",
-    )
-    parser.add_argument(
-        "--output",
-        default="data/crawled.json",
-        help="مسیر ذخیره خروجی JSON",
-    )
-    parser.add_argument(
-        "--chunks-output",
-        default="data/chunks.jsonl",
-        help="مسیر ذخیره خروجی chunk ها (JSONL)",
-    )
-    parser.add_argument("--chunk-size", type=int, default=500, help="حداکثر طول هر chunk (کاراکتر)")
-    parser.add_argument("--chunk-overlap", type=int, default=50, help="مقدار هم‌پوشانی بین chunk های متوالی")
-    parser.add_argument(
-        "--no-chunk",
-        action="store_true",
-        help="فقط crawl انجام شود، مرحله chunking اجرا نشود",
-    )
-    return parser.parse_args()
+from crawler import parse_args
 
 
 def main() -> None:
