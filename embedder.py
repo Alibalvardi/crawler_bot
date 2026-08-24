@@ -10,6 +10,7 @@ from sentence_transformers import SentenceTransformer
 import httpx
 import numpy as np
 from openai import OpenAI
+from sympy import true
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,6 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
 OPENAI_API_BASE = "https://api.openai.com/v1"
 
-# نگه‌داشته شده برای سازگاری با کدهای قبلی که از این نام استفاده می‌کردند
-DEFAULT_MODEL = DEFAULT_LOCAL_MODEL
 
 
 @dataclass
@@ -54,33 +53,23 @@ def embed_texts(
         texts: list[str],
         *,
         backend: str = "local",
-        model_name: str | None = None,
         batch_size: int = 32,
         show_progress: bool = True,
-        gemini_api_key: str | None = None,
-        openai_api_key: str | None = None,
-        openai_base_url: str | None = None,
 ) -> np.ndarray:
     if backend == "local":
         return _embed_texts_local(
             texts,
-            model_name=model_name or DEFAULT_LOCAL_MODEL,
             batch_size=batch_size,
             show_progress=show_progress,
         )
     if backend == "gemini":
         return _embed_texts_gemini(
             texts,
-            model_name=model_name or DEFAULT_GEMINI_MODEL,
-            api_key=gemini_api_key,
             show_progress=show_progress,
         )
     if backend == "openai":
         return _embed_texts_openai(
             texts,
-            model_name=model_name or DEFAULT_OPENAI_MODEL,
-            api_key=openai_api_key,
-            base_url=openai_base_url or OPENAI_API_BASE,
             batch_size=batch_size,
             show_progress=show_progress,
         )
@@ -90,12 +79,11 @@ def embed_texts(
 def _embed_texts_local(
         texts: list[str],
         *,
-        model_name: str,
         batch_size: int,
         show_progress: bool,
 ) -> np.ndarray:
-    logger.info("loading local embedding model: %s", model_name)
-    model = SentenceTransformer(model_name)
+    logger.info("loading local embedding model: %s", DEFAULT_LOCAL_MODEL)
+    model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=true)
 
     logger.info("embedding %d texts locally (batch_size=%d)", len(texts), batch_size)
     embeddings = model.encode(
@@ -111,20 +99,19 @@ def _embed_texts_local(
 def _embed_texts_gemini(
         texts: list[str],
         *,
-        model_name: str,
-        api_key: str | None,
         show_progress: bool,
         batch_size: int = 20,  # سقف batchEmbedContents در حال حاضر ۱۰۰ است؛ ۲۰ محافظه‌کارانه و امن است
         max_retries: int = 3,
 ) -> np.ndarray:
-    api_key = api_key or os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
             "برای backend='gemini' باید GEMINI_API_KEY را به‌عنوان متغیر محیطی تنظیم کنی "
             "یا مستقیماً gemini_api_key را پاس بدهی."
         )
 
-    url = f"{GEMINI_API_BASE}/models/{model_name}:batchEmbedContents"
+    #todo
+    url = f"{GEMINI_API_BASE}/models/:batchEmbedContents"
     all_vectors: list[list[float]] = []
 
     with httpx.Client(timeout=30.0) as client:
@@ -133,7 +120,7 @@ def _embed_texts_gemini(
             payload = {
                 "requests": [
                     {
-                        "model": f"models/{model_name}",
+                        "model": f"models/",
                         "content": {"parts": [{"text": t}]},
                     }
                     for t in batch
@@ -166,35 +153,32 @@ def _embed_texts_gemini(
     return embeddings / norms
 
 
-def _openai_embed_batch(client, texts: list[str], model: str) -> list[list[float]]:
-    response = client.embeddings.create(model=model, input=texts)
+def _openai_embed_batch(client, texts: list[str]) -> list[list[float]]:
+    response = client.embeddings.create(model=DEFAULT_OPENAI_MODEL, input=texts)
     return [item.embedding for item in response.data]
 
 
 def _embed_texts_openai(
         texts: list[str],
         *,
-        model_name: str,
-        api_key: str | None,
-        base_url: str,
         batch_size: int,
         show_progress: bool,
 ) -> np.ndarray:
     from openai import OpenAI
 
-    api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
             "برای backend='openai' باید OPENAI_API_KEY را به‌عنوان متغیر محیطی تنظیم کنی "
             "یا مستقیماً openai_api_key را پاس بدهی."
         )
 
-    client = OpenAI(base_url=base_url, api_key=api_key)
+    client = OpenAI(base_url="", api_key=api_key)
 
     all_vectors: list[list[float]] = []
     done = 0
     for batch in _batched(texts, batch_size):
-        vectors = _openai_embed_batch(client, batch, model=model_name)
+        vectors = _openai_embed_batch(client, batch,)
         all_vectors.extend(vectors)
         done += len(batch)
         if show_progress:
@@ -211,12 +195,6 @@ def embed_chunks_openai(
         model: str = DEFAULT_OPENAI_MODEL,
         batch_size: int = 32,
 ) -> list[EmbeddedChunk]:
-    """معادل embed_chunks ولی مخصوص backend اوپن‌ای‌آی (یا پروکسی‌های سازگار مثل gapgpt.app)،
-    که به‌جای آرایه‌ی numpy، مستقیماً لیستی از EmbeddedChunk (شامل خود بردار) برمی‌گرداند.
-    این شکل خروجی برای مواقعی مفید است که می‌خواهی متن + متادیتا + بردار را با هم
-    در یک ساختار واحد نگه داری (مثلاً قبل از نوشتن در فایل یا دیتابیس).
-    """
-
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -253,9 +231,6 @@ def embed_chunks(
         model_name: str | None = None,
         batch_size: int = 32,
         show_progress: bool = True,
-        gemini_api_key: str | None = None,
-        openai_api_key: str | None = None,
-        openai_base_url: str | None = None,
 ) -> np.ndarray:
     """متن هر chunk را با backend انتخابی به بردار تبدیل می‌کند.
 
@@ -269,9 +244,6 @@ def embed_chunks(
         model_name=model_name,
         batch_size=batch_size,
         show_progress=show_progress,
-        gemini_api_key=gemini_api_key,
-        openai_api_key=openai_api_key,
-        openai_base_url=openai_base_url,
     )
 
 
@@ -306,11 +278,7 @@ if __name__ == "__main__":
     parser.add_argument("--backend", choices=["local", "gemini", "openai"], default="local")
     parser.add_argument("--model", default=None, help="model name (defaults depend on backend)")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument(
-        "--openai-base-url",
-        default=None,
-        help="در صورت استفاده از پروکسی (مثل gapgpt.app) به‌جای api.openai.com",
-    )
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -324,10 +292,9 @@ if __name__ == "__main__":
         backend=args.backend,
         model_name=args.model,
         batch_size=args.batch_size,
-        openai_base_url=args.openai_base_url,
     )
     # پوشه‌ی خروجی جدا برای هر backend، تا نتایج local و gemini با هم قاطی نشوند
-    out_dir = Path(args.output_dir) / args.backend
+    out_dir = Path(args.output_dir)
     vectors_path, metadata_path = save_embeddings(chunks, embeddings, out_dir)
 
     print(f"\n{len(chunks)} chunk با backend={args.backend} embed شد.")
