@@ -5,6 +5,7 @@ trafilatura>=2.0.0
 openai>=1.40.0
 numpy>=1.26.0
 python-dotenv>=1.0.0
+python-telegram-bot>=22.0
 
 sentence-transformers
 chromadb

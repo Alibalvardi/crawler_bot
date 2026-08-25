@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _value(value: str | None, prompt: str) -> str:
     result = (value or input(prompt)).strip()
     if not result:
-        raise SystemExit("ورودی نمی‌تواند خالی باشد.")
+        raise SystemExit("ورودی نمی‌تواند خ+++++++++. الی باشد.")
     return result
 
 
