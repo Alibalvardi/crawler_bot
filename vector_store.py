@@ -145,13 +145,13 @@ if __name__ == "__main__":
     build_p.add_argument("chunks_jsonl")
     build_p.add_argument("embeddings")
     build_p.add_argument("--site-id", required=True, help="شناسه‌ی یکتای سایت (مثلاً دامنه)")
-    build_p.add_argument("--backend", choices=["local", "gemini"], default="local")
+    build_p.add_argument("--backend", choices=["local", ], default="local")
     build_p.add_argument("--persist-dir", default=DEFAULT_PERSIST_DIR)
 
     query_p = subparsers.add_parser("query", help="جست‌وجوی شباهت در یک collection موجود")
     query_p.add_argument("query_text")
     query_p.add_argument("--site-id", required=True)
-    query_p.add_argument("--backend", choices=["local", "gemini"], default="local")
+    query_p.add_argument("--backend", choices=["local", "openai"], default="openai")
     query_p.add_argument("--persist-dir", default=DEFAULT_PERSIST_DIR)
     query_p.add_argument("--top-k", type=int, default=5)
     query_p.add_argument(

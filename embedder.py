@@ -16,8 +16,6 @@ from torch.version import cuda
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOCAL_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-DEFAULT_GEMINI_MODEL = "gemini-embedding-001"
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
 OPENAI_API_BASE = "https://api.openai.com/v1"
 
@@ -63,18 +61,14 @@ def embed_texts(
             batch_size=batch_size,
             show_progress=show_progress,
         )
-    if backend == "gemini":
-        return _embed_texts_gemini(
-            texts,
-            show_progress=show_progress,
-        )
+
     if backend == "openai":
         return _embed_texts_openai(
             texts,
             batch_size=batch_size,
             show_progress=show_progress,
         )
-    raise ValueError(f"backend ناشناخته: {backend!r} (باید 'local'، 'gemini' یا 'openai' باشد)")
+    raise ValueError(f"backend ناشناخته: {backend!r} (باید 'local'،  یا 'openai' باشد)")
 
 
 def _embed_texts_local(
@@ -97,62 +91,6 @@ def _embed_texts_local(
     return embeddings
 
 
-def _embed_texts_gemini(
-        texts: list[str],
-        *,
-        show_progress: bool,
-        batch_size: int = 20,
-        max_retries: int = 3,
-) -> np.ndarray:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "برای backend='gemini' باید GEMINI_API_KEY را به‌عنوان متغیر محیطی تنظیم کنی "
-            "یا مستقیماً gemini_api_key را پاس بدهی."
-        )
-
-    #todo
-    url = f"{GEMINI_API_BASE}/models/:batchEmbedContents"
-    all_vectors: list[list[float]] = []
-
-    with httpx.Client(timeout=30.0) as client:
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i: i + batch_size]
-            payload = {
-                "requests": [
-                    {
-                        "model": f"models/",
-                        "content": {"parts": [{"text": t}]},
-                    }
-                    for t in batch
-                ]
-            }
-
-            for attempt in range(max_retries):
-                response = client.post(url, params={"key": api_key}, json=payload)
-                if response.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning("Gemini rate limit hit, retrying in %ss", wait)
-                    time.sleep(wait)
-                    continue
-                response.raise_for_status()
-                break
-            else:
-                raise RuntimeError(f"Gemini embedding API پس از {max_retries} تلاش شکست خورد.")
-
-            data = response.json()
-            for item in data["embeddings"]:
-                all_vectors.append(item["values"])
-
-            if show_progress:
-                logger.info("gemini embedded %d/%d", min(i + batch_size, len(texts)), len(texts))
-
-    embeddings = np.array(all_vectors, dtype="float32")
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    return embeddings / norms
-
-
 def _openai_embed_batch(client, texts: list[str]) -> list[list[float]]:
     response = client.embeddings.create(model=DEFAULT_OPENAI_MODEL, input=texts)
     return [item.embedding for item in response.data]
@@ -166,19 +104,19 @@ def _embed_texts_openai(
 ) -> np.ndarray:
     from openai import OpenAI
 
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = "sk-ydXsKQkQKbM7KmW3N3r7HY8KqOcelJ8Oj45Xuj78cvv2XkLa"
     if not api_key:
         raise RuntimeError(
             "برای backend='openai' باید OPENAI_API_KEY را به‌عنوان متغیر محیطی تنظیم کنی "
             "یا مستقیماً openai_api_key را پاس بدهی."
         )
 
-    client = OpenAI(base_url="", api_key=api_key)
+    client = OpenAI(base_url="https://api.gapgpt.app/v1", api_key=api_key)
 
     all_vectors: list[list[float]] = []
     done = 0
     for batch in _batched(texts, batch_size):
-        vectors = _openai_embed_batch(client, batch,)
+        vectors = _openai_embed_batch(client, batch)
         all_vectors.extend(vectors)
         done += len(batch)
         if show_progress:
@@ -263,10 +201,10 @@ def save_embeddings(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Embed chunks.jsonl using a local or Gemini embedding backend.")
+    parser = argparse.ArgumentParser(description="Embed chunks.jsonl using a local or openai embedding backend.")
     parser.add_argument("chunks_jsonl", help="path to chunks.jsonl (from chunker.py)")
     parser.add_argument("-o", "--output-dir", default="data/embeddings", help="directory to save vectors + metadata")
-    parser.add_argument("--backend", choices=["local", "gemini", "openai"], default="local")
+    parser.add_argument("--backend", choices=["local", "openai"], default="openai")
     parser.add_argument("--model", default=None, help="model name (defaults depend on backend)")
     parser.add_argument("--batch-size", type=int, default=32)
 
