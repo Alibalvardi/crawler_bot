@@ -3,15 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
-import httpx
 import numpy as np
+from dotenv import load_dotenv
 from openai import OpenAI
-from sympy import true
-from torch.version import cuda
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +75,7 @@ def _embed_texts_local(
         show_progress: bool,
 ) -> np.ndarray:
     logger.info("loading local embedding model: %s", DEFAULT_LOCAL_MODEL)
-    model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=true,device="cuda")
+    model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=True,device="cuda" if _cuda_available() else "cpu")
 
     logger.info("embedding %d texts locally (batch_size=%d)", len(texts), batch_size)
     embeddings = model.encode(
@@ -91,8 +88,13 @@ def _embed_texts_local(
     return embeddings
 
 
-def _openai_embed_batch(client, texts: list[str]) -> list[list[float]]:
-    response = client.embeddings.create(model=DEFAULT_OPENAI_MODEL, input=texts)
+def _openai_embed_batch(
+    client,
+    texts: list[str],
+    *,
+    model: str = DEFAULT_OPENAI_MODEL,
+) -> list[list[float]]:
+    response = client.embeddings.create(model=model, input=texts)
     return [item.embedding for item in response.data]
 
 
@@ -101,10 +103,10 @@ def _embed_texts_openai(
         *,
         batch_size: int,
         show_progress: bool,
+        api_key: str | None = None,
 ) -> np.ndarray:
-    from openai import OpenAI
-
-    api_key = "sk-ydXsKQkQKbM7KmW3N3r7HY8KqOcelJ8Oj45Xuj78cvv2XkLa"
+    load_dotenv()
+    api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
             "برای backend='openai' باید OPENAI_API_KEY را به‌عنوان متغیر محیطی تنظیم کنی "
@@ -125,6 +127,15 @@ def _embed_texts_openai(
     return np.array(all_vectors, dtype="float32")
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except ImportError:
+        return False
+
+
 def embed_chunks_openai(
         chunks: list[dict],
         *,
@@ -133,6 +144,7 @@ def embed_chunks_openai(
         model: str = DEFAULT_OPENAI_MODEL,
         batch_size: int = 32,
 ) -> list[EmbeddedChunk]:
+    load_dotenv()
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -204,7 +216,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Embed chunks.jsonl using a local or openai embedding backend.")
     parser.add_argument("chunks_jsonl", help="path to chunks.jsonl (from chunker.py)")
     parser.add_argument("-o", "--output-dir", default="data/embeddings", help="directory to save vectors + metadata")
-    parser.add_argument("--backend", choices=["local", "openai"], default="openai")
+    parser.add_argument("--backend", choices=["local", "openai"], default="local")
     parser.add_argument("--model", default=None, help="model name (defaults depend on backend)")
     parser.add_argument("--batch-size", type=int, default=32)
 

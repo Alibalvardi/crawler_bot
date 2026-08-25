@@ -5,4 +5,4 @@ __pycache__/
 data/crawled.json
 .env
 data/chunks.jsonl
-data
+data.env
