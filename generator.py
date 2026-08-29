@@ -35,8 +35,7 @@ def build_prompt(query: str, hits: list[dict]) -> str:
 {context}
 
 سوال کاربر: {query}
-
-پاسخ:"""
+"""
 
 
 def generate_answer(

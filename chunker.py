@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 
 # ترتیب اولویت جداکننده‌ها برای شکستن متن: اول پاراگراف، بعد خط، بعد جمله، بعد کلمه.
 # اینجوری تا حد امکان وسط یک جمله یا کلمه بریده نمی‌شه.
@@ -27,6 +28,7 @@ def split_text(
     chunk_size: int = 500,
     chunk_overlap: int = 50,
     separators: list[str] | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> list[str]:
     """متن را به‌صورت بازگشتی با جداکننده‌های داده‌شده می‌شکند تا قطعاتی
     نزدیک به chunk_size کاراکتر (و در صورت امکان از مرز جمله/پاراگراف) تولید شود،
@@ -37,11 +39,18 @@ def split_text(
     if separators is None:
         separators = DEFAULT_SEPARATORS
 
-    pieces = _recursive_split(text, chunk_size, separators)
-    return _merge_with_overlap(pieces, chunk_size, chunk_overlap)
+    _check_cancel(cancel_check)
+    pieces = _recursive_split(text, chunk_size, separators, cancel_check)
+    return _merge_with_overlap(pieces, chunk_size, chunk_overlap, cancel_check)
 
 
-def _recursive_split(text: str, chunk_size: int, separators: list[str]) -> list[str]:
+def _recursive_split(
+    text: str,
+    chunk_size: int,
+    separators: list[str],
+    cancel_check: Callable[[], None] | None = None,
+) -> list[str]:
+    _check_cancel(cancel_check)
     if len(text) <= chunk_size:
         return [text]
 
@@ -56,14 +65,22 @@ def _recursive_split(text: str, chunk_size: int, separators: list[str]) -> list[
     parts = [p for p in text.split(sep) if p.strip()]
     result: list[str] = []
     for part in parts:
+        _check_cancel(cancel_check)
         if len(part) > chunk_size:
-            result.extend(_recursive_split(part, chunk_size, rest_separators))
+            result.extend(
+                _recursive_split(part, chunk_size, rest_separators, cancel_check)
+            )
         else:
             result.append(part)
     return result
 
 
-def _merge_with_overlap(pieces: list[str], chunk_size: int, chunk_overlap: int) -> list[str]:
+def _merge_with_overlap(
+    pieces: list[str],
+    chunk_size: int,
+    chunk_overlap: int,
+    cancel_check: Callable[[], None] | None = None,
+) -> list[str]:
     """قطعات کوچک را کنار هم می‌چیند تا نزدیک chunk_size شوند، با overlap بین chunk متوالی."""
     if not pieces:
         return []
@@ -73,6 +90,7 @@ def _merge_with_overlap(pieces: list[str], chunk_size: int, chunk_overlap: int) 
     current_len = 0
 
     for piece in pieces:
+        _check_cancel(cancel_check)
         piece_len = len(piece) + 1  # +1 برای فاصله‌ای که موقع join اضافه می‌شود
         if current and current_len + piece_len > chunk_size:
             chunks.append(" ".join(current).strip())
@@ -132,6 +150,54 @@ def chunk_crawl_result(
             )
 
     return all_chunks
+
+
+def chunk_crawl_pages(
+    pages: list[object],
+    *,
+    chunk_size: int = 500,
+    chunk_overlap: int = 50,
+    min_chunk_chars: int = 30,
+    cancel_check: Callable[[], None] | None = None,
+) -> list[Chunk]:
+    """Chunk in-memory crawler Page objects without writing a JSON file."""
+    all_chunks: list[Chunk] = []
+
+    for page in pages:
+        _check_cancel(cancel_check)
+        url = str(getattr(page, "url", ""))
+        title = str(getattr(page, "title", "") or "")
+        depth = int(getattr(page, "depth", 0))
+        text = str(getattr(page, "text", "") or "")
+
+        pieces = split_text(
+            text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            cancel_check=cancel_check,
+        )
+        for idx, piece in enumerate(pieces):
+            _check_cancel(cancel_check)
+            if len(piece) < min_chunk_chars:
+                continue
+            all_chunks.append(
+                Chunk(
+                    chunk_id=f"{_slugify(url)}::{idx}",
+                    url=url,
+                    title=title,
+                    depth=depth,
+                    chunk_index=idx,
+                    text=piece,
+                    char_count=len(piece),
+                )
+            )
+
+    return all_chunks
+
+
+def _check_cancel(cancel_check: Callable[[], None] | None) -> None:
+    if cancel_check is not None:
+        cancel_check()
 
 
 def _slugify(url: str) -> str:

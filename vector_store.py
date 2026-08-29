@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
+
 import chromadb
 import numpy as np
 
@@ -20,6 +22,102 @@ def _collection_name(site_id: str) -> str:
 def get_client(persist_dir: str | Path = DEFAULT_PERSIST_DIR):
     Path(persist_dir).mkdir(parents=True, exist_ok=True)
     return chromadb.PersistentClient(path=str(persist_dir))
+
+
+def _user_collection_name(telegram_id: int) -> str:
+    return f"user_{int(telegram_id)}"
+
+
+def save_user_chunks(
+    telegram_id: int,
+    chunks: list[object],
+    embeddings: np.ndarray,
+    *,
+    persist_dir: str | Path = DEFAULT_PERSIST_DIR,
+) -> int:
+    """Replace the user's temporary collection with chunk text + vectors."""
+    if not chunks:
+        raise ValueError("chunks نمی‌تواند خالی باشد.")
+    if not isinstance(embeddings, np.ndarray) or embeddings.ndim != 2:
+        raise ValueError("embeddings باید آرایه دوبعدی NumPy باشد.")
+    if len(chunks) != len(embeddings):
+        raise ValueError("تعداد chunkها و embeddingها برابر نیست.")
+
+    client = get_client(persist_dir)
+    name = _user_collection_name(telegram_id)
+    try:
+        client.delete_collection(name)
+    except Exception:
+        pass
+    collection = client.create_collection(
+        name=name,
+        metadata={"telegram_id": int(telegram_id)},
+    )
+    collection.add(
+        ids=[
+            str(getattr(chunk, "chunk_id"))
+            for chunk in chunks
+        ],
+        embeddings=embeddings.astype("float32").tolist(),
+        documents=[str(getattr(chunk, "text")) for chunk in chunks],
+        metadatas=[
+            {
+                "url": str(getattr(chunk, "url", "")),
+                "title": str(getattr(chunk, "title", "") or ""),
+                "depth": int(getattr(chunk, "depth", 0)),
+                "chunk_index": int(getattr(chunk, "chunk_index", 0)),
+                "telegram_id": int(telegram_id),
+            }
+            for chunk in chunks
+        ],
+    )
+    return collection.count()
+
+
+def retrieve_user_chunks(
+    telegram_id: int,
+    query_embedding: np.ndarray,
+    *,
+    top_k: int = 5,
+    persist_dir: str | Path = DEFAULT_PERSIST_DIR,
+    distance_threshold: float | None = None,
+) -> list[dict]:
+    if top_k <= 0:
+        raise ValueError("top_k باید بزرگ‌تر از صفر باشد.")
+    vector = np.asarray(query_embedding, dtype="float32").reshape(-1).tolist()
+    client = get_client(persist_dir)
+    collection = client.get_collection(_user_collection_name(telegram_id))
+    result = collection.query(
+        query_embeddings=[vector],
+        n_results=min(top_k, collection.count()),
+        include=["documents", "metadatas", "distances"],
+    )
+    documents = result.get("documents", [[]])[0]
+    metadatas = result.get("metadatas", [[]])[0]
+    distances = result.get("distances", [[]])[0]
+    return [
+        {
+            "text": document,
+            "url": metadata.get("url", ""),
+            "title": metadata.get("title", ""),
+            "distance": distance,
+        }
+        for document, metadata, distance in zip(
+            documents, metadatas, distances
+        )
+    ]
+
+
+def delete_user_collection(
+    telegram_id: int,
+    *,
+    persist_dir: str | Path = DEFAULT_PERSIST_DIR,
+) -> None:
+    client = get_client(persist_dir)
+    try:
+        client.delete_collection(_user_collection_name(telegram_id))
+    except Exception:
+        pass
 
 
 def build_vector_store(

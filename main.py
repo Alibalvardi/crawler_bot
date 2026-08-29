@@ -144,6 +144,9 @@ def run_pipeline(args: argparse.Namespace) -> str:
         distance_threshold=args.distance_threshold,
     )
     print(f"      {len(hits)} نتیجه پیدا شد.")
+    for i, hit in enumerate(hits, 1):
+        print(f"{i}. [{hit['distance']:.4f}] {hit['title']} ({hit['url']})")
+        print(f"   {hit['text']}...\n")
 
     print("[۶/۶] در حال تولید پاسخ...")
     generation_kwargs = {}

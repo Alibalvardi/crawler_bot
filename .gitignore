@@ -4,5 +4,7 @@ __pycache__/
 .idea/
 data/crawled.json
 .env
+telegram/.env
+telegram/data/
 data/chunks.jsonl
 data.env

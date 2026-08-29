@@ -7,6 +7,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
@@ -98,6 +99,7 @@ def crawl(
     retries: int = 2,
     verify_ssl: bool = True,
     resume_from: str | Path | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> CrawlResult:
     return asyncio.run(
         acrawl(
@@ -110,6 +112,7 @@ def crawl(
             retries=retries,
             verify_ssl=verify_ssl,
             resume_from=resume_from,
+            cancel_check=cancel_check,
         )
     )
 
@@ -125,7 +128,9 @@ async def acrawl(
     retries: int = 2,
     verify_ssl: bool = True,
     resume_from: str | Path | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> CrawlResult:
+    _check_cancel(cancel_check)
     resume_data = _load_crawl_file(resume_from) if resume_from else None
     if resume_data:
         seed = resume_data.seed_url
@@ -143,7 +148,14 @@ async def acrawl(
         initial = [(seed, 0)]
         seen = {seed}
 
-    robots = await asyncio.to_thread(load_robots, seed, timeout, verify_ssl)
+    _check_cancel(cancel_check)
+    robots = await load_robots_async(
+        seed,
+        timeout=timeout,
+        verify_ssl=verify_ssl,
+        cancel_check=cancel_check,
+    )
+    _check_cancel(cancel_check)
     workers = max(1, concurrency)
     timeout_config = httpx.Timeout(timeout, connect=min(20.0, timeout))
     limits = httpx.Limits(max_connections=workers, max_keepalive_connections=workers)
@@ -170,6 +182,7 @@ async def acrawl(
             delay=delay,
             workers=workers,
             verify_ssl=verify_ssl,
+            cancel_check=cancel_check,
         )
         for round_no in range(1, max(0, retries) + 1):
             pending = list(result.errors)
@@ -178,6 +191,7 @@ async def acrawl(
             result.errors = []
             logger.info("retry round %s: %s urls", round_no, len(pending))
             await asyncio.sleep(1)
+            _check_cancel(cancel_check)
             await _run_workers(
                 client=client,
                 jobs=[(item.url, item.depth) for item in pending],
@@ -190,6 +204,7 @@ async def acrawl(
                 delay=max(delay, 0.2),
                 workers=max(1, min(8, workers)),
                 verify_ssl=verify_ssl,
+                cancel_check=cancel_check,
             )
 
     return result
@@ -208,6 +223,7 @@ async def _run_workers(
     delay: float,
     workers: int,
     verify_ssl: bool = True,
+    cancel_check: Callable[[], None] | None = None,
 ) -> None:
     queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
     for job in jobs:
@@ -227,11 +243,18 @@ async def _run_workers(
                 max_depth=max_depth,
                 delay=delay,
                 verify_ssl=verify_ssl,
+                cancel_check=cancel_check,
             )
         )
         for _ in range(workers)
     ]
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @dataclass
@@ -253,8 +276,10 @@ async def _worker(
     max_depth: int,
     delay: float,
     verify_ssl: bool = True,
+    cancel_check: Callable[[], None] | None = None,
 ) -> None:
     while True:
+        _check_cancel(cancel_check)
         async with state.lock:
             if len(result.pages) >= max_pages:
                 return
@@ -277,6 +302,7 @@ async def _worker(
                 continue
             if delay > 0:
                 await asyncio.sleep(delay)
+            _check_cancel(cancel_check)
             await _fetch_one(
                 client=client,
                 url=url,
@@ -288,6 +314,7 @@ async def _worker(
                 max_pages=max_pages,
                 max_depth=max_depth,
                 verify_ssl=verify_ssl,
+                cancel_check=cancel_check,
             )
         finally:
             async with state.lock:
@@ -306,13 +333,16 @@ async def _fetch_one(
     max_pages: int,
     max_depth: int,
     verify_ssl: bool = True,
+    cancel_check: Callable[[], None] | None = None,
 ) -> None:
+    _check_cancel(cancel_check)
     async with state.lock:
         if len(result.pages) >= max_pages:
             return
 
     try:
         response = await client.get(url)
+        _check_cancel(cancel_check)
     except httpx.HTTPError as exc:
         if verify_ssl and _is_ssl_error(exc):
             logger.warning("SSL verify failed for %s, retrying without certificate check", url)
@@ -362,6 +392,7 @@ async def _fetch_one(
     # path segment when joining relative hrefs).
     link_base_url = str(response.url)
     title, text, links = await asyncio.to_thread(parse_page, response.text, link_base_url)
+    _check_cancel(cancel_check)
 
     async with state.lock:
         if len(result.pages) >= max_pages:
@@ -380,6 +411,7 @@ async def _fetch_one(
         logger.info("[%s] %s/%s depth=%s %s", response.status_code, len(result.pages), max_pages, depth, final_url)
         if depth < max_depth and response.is_success:
             for link in links:
+                _check_cancel(cancel_check)
                 if link in state.seen or not same_domain(seed, link):
                     continue
                 state.seen.add(link)
@@ -396,6 +428,66 @@ def _is_ssl_error(exc: BaseException) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _check_cancel(cancel_check: Callable[[], None] | None) -> None:
+    if cancel_check is not None:
+        cancel_check()
+
+
+async def load_robots_async(
+    seed_url: str,
+    *,
+    timeout: float = 10.0,
+    verify_ssl: bool = True,
+    cancel_check: Callable[[], None] | None = None,
+) -> RobotFileParser | None:
+    """Read robots.txt without creating an uncancellable worker thread."""
+    _check_cancel(cancel_check)
+    robots_url = urljoin(seed_url, "/robots.txt")
+    parser = RobotFileParser()
+    parser.set_url(robots_url)
+    try:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": USER_AGENT},
+            timeout=timeout,
+            follow_redirects=True,
+            verify=verify_ssl,
+        ) as client:
+            response = await client.get(robots_url)
+        _check_cancel(cancel_check)
+        if response.status_code >= 400:
+            return None
+        parser.parse(response.text.splitlines())
+        return parser
+    except httpx.HTTPError as exc:
+        if verify_ssl and _is_ssl_error(exc):
+            logger.warning(
+                "SSL verify failed for %s, retrying without certificate check",
+                robots_url,
+            )
+            try:
+                async with httpx.AsyncClient(
+                    headers={"User-Agent": USER_AGENT},
+                    timeout=timeout,
+                    follow_redirects=True,
+                    verify=False,
+                ) as client:
+                    response = await client.get(robots_url)
+                _check_cancel(cancel_check)
+                if response.status_code >= 400:
+                    return None
+                parser.parse(response.text.splitlines())
+                return parser
+            except httpx.HTTPError as retry_exc:
+                logger.warning(
+                    "could not read robots.txt (%s): %s",
+                    robots_url,
+                    retry_exc,
+                )
+                return None
+        logger.warning("could not read robots.txt (%s): %s", robots_url, exc)
+        return None
 
 
 async def _get_without_ssl_verify(client: httpx.AsyncClient, url: str, timeout: httpx.Timeout) -> httpx.Response:
@@ -514,7 +606,7 @@ def parse_args() -> argparse.Namespace:
         description="مرحله ۱: دریافت مطالب یک وب‌سایت (crawl همان دامنه)",
     )
     parser.add_argument("url", nargs="?", help="آدرس یا دامنه وب‌سایت، مثلاً example.com")
-    parser.add_argument("--max-pages", type=int, default=500, help="حداکثر تعداد صفحات")
+    parser.add_argument("--max-pages", type=int, default=5, help="حداکثر تعداد صفحات")
     parser.add_argument("--max-depth", type=int, default=10, help="حداکثر عمق لینک‌ها")
     parser.add_argument("--concurrency", type=int, default=16, help="تعداد درخواست همزمان")
     parser.add_argument("--delay", type=float, default=0.0, help="وقفه بین درخواست‌های هر worker (ثانیه)")

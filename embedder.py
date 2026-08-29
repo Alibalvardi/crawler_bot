@@ -5,12 +5,15 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
+ProgressCallback = Callable[[int, int], None]
+CancelCheck = Callable[[], None]
 
 DEFAULT_LOCAL_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
@@ -49,21 +52,29 @@ def embed_texts(
         texts: list[str],
         *,
         backend: str = "local",
+        model: str | None = None,
         batch_size: int = 32,
         show_progress: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        cancel_check: CancelCheck | None = None,
 ) -> np.ndarray:
     if backend == "local":
         return _embed_texts_local(
             texts,
             batch_size=batch_size,
             show_progress=show_progress,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
         )
 
     if backend == "openai":
         return _embed_texts_openai(
             texts,
+            model=model or DEFAULT_OPENAI_MODEL,
             batch_size=batch_size,
             show_progress=show_progress,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
         )
     raise ValueError(f"backend ناشناخته: {backend!r} (باید 'local'،  یا 'openai' باشد)")
 
@@ -73,19 +84,33 @@ def _embed_texts_local(
         *,
         batch_size: int,
         show_progress: bool,
+        progress_callback: ProgressCallback | None = None,
+        cancel_check: CancelCheck | None = None,
 ) -> np.ndarray:
     logger.info("loading local embedding model: %s", DEFAULT_LOCAL_MODEL)
     model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=True,device="cuda" if _cuda_available() else "cpu")
 
     logger.info("embedding %d texts locally (batch_size=%d)", len(texts), batch_size)
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=show_progress,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-    )
-    return embeddings
+    all_embeddings = []
+    done = 0
+    for batch in _batched(texts, batch_size):
+        _check_cancel(cancel_check)
+        all_embeddings.append(
+            model.encode(
+                batch,
+                batch_size=batch_size,
+                show_progress_bar=show_progress,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+        )
+        done += len(batch)
+        _check_cancel(cancel_check)
+        if progress_callback:
+            progress_callback(done, len(texts))
+    if not all_embeddings:
+        return np.empty((0, 0), dtype="float32")
+    return np.concatenate(all_embeddings, axis=0)
 
 
 def _openai_embed_batch(
@@ -101,9 +126,12 @@ def _openai_embed_batch(
 def _embed_texts_openai(
         texts: list[str],
         *,
+        model: str = DEFAULT_OPENAI_MODEL,
         batch_size: int,
         show_progress: bool,
         api_key: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        cancel_check: CancelCheck | None = None,
 ) -> np.ndarray:
     load_dotenv()
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -118,21 +146,30 @@ def _embed_texts_openai(
     all_vectors: list[list[float]] = []
     done = 0
     for batch in _batched(texts, batch_size):
-        vectors = _openai_embed_batch(client, batch)
+        _check_cancel(cancel_check)
+        vectors = _openai_embed_batch(client, batch, model=model)
         all_vectors.extend(vectors)
         done += len(batch)
+        _check_cancel(cancel_check)
         if show_progress:
             logger.info("openai embedded %d/%d", done, len(texts))
+        if progress_callback:
+            progress_callback(done, len(texts))
 
     return np.array(all_vectors, dtype="float32")
 
 
-def _cuda_available() -> bool:
-    try:
-        import torch
+def _check_cancel(cancel_check: CancelCheck | None) -> None:
+    if cancel_check is not None:
+        cancel_check()
 
-        return bool(torch.cuda.is_available())
-    except ImportError:
+
+def _cuda_available() -> bool:
+    # try:
+    #     import torch
+    #
+    #     return bool(torch.cuda.is_available())
+    # except ImportError:
         return False
 
 
