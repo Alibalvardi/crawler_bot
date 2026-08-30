@@ -53,26 +53,37 @@ def save_user_chunks(
         name=name,
         metadata={"telegram_id": int(telegram_id)},
     )
-    collection.add(
-        ids=[
-            str(getattr(chunk, "chunk_id"))
-            for chunk in chunks
-        ],
-        embeddings=embeddings.astype("float32").tolist(),
-        documents=[str(getattr(chunk, "text")) for chunk in chunks],
-        metadatas=[
-            {
-                "url": str(getattr(chunk, "url", "")),
-                "title": str(getattr(chunk, "title", "") or ""),
-                "depth": int(getattr(chunk, "depth", 0)),
-                "chunk_index": int(getattr(chunk, "chunk_index", 0)),
-                "telegram_id": int(telegram_id),
-            }
-            for chunk in chunks
-        ],
-    )
-    return collection.count()
 
+    ids = [str(getattr(chunk, "chunk_id")) for chunk in chunks]
+    documents = [str(getattr(chunk, "text")) for chunk in chunks]
+    metadatas = [
+        {
+            "url": str(getattr(chunk, "url", "")),
+            "title": str(getattr(chunk, "title", "") or ""),
+            "depth": int(getattr(chunk, "depth", 0)),
+            "chunk_index": int(getattr(chunk, "chunk_index", 0)),
+            "telegram_id": int(telegram_id),
+        }
+        for chunk in chunks
+    ]
+    vectors = embeddings.astype("float32").tolist()
+
+    try:
+        max_batch = client.get_max_batch_size()
+    except AttributeError:
+        max_batch = 4000
+
+    total = len(ids)
+    for start in range(0, total, max_batch):
+        end = min(start + max_batch, total)
+        collection.add(
+            ids=ids[start:end],
+            embeddings=vectors[start:end],
+            documents=documents[start:end],
+            metadatas=metadatas[start:end],
+        )
+
+    return collection.count()
 
 def retrieve_user_chunks(
     telegram_id: int,
