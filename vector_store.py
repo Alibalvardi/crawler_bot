@@ -28,6 +28,18 @@ def _user_collection_name(telegram_id: int) -> str:
     return f"user_{int(telegram_id)}"
 
 
+def _unique_indices(ids: list[str]) -> list[int]:
+    """Return the indices of the first occurrence of every ID."""
+    seen: set[str] = set()
+    unique_indices: list[int] = []
+    for index, chunk_id in enumerate(ids):
+        if chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        unique_indices.append(index)
+    return unique_indices
+
+
 def save_user_chunks(
     telegram_id: int,
     chunks: list[object],
@@ -54,19 +66,29 @@ def save_user_chunks(
         metadata={"telegram_id": int(telegram_id)},
     )
 
-    ids = [str(getattr(chunk, "chunk_id")) for chunk in chunks]
-    documents = [str(getattr(chunk, "text")) for chunk in chunks]
+    all_ids = [str(getattr(chunk, "chunk_id")) for chunk in chunks]
+    unique_indices = _unique_indices(all_ids)
+    duplicate_count = len(all_ids) - len(unique_indices)
+    if duplicate_count:
+        logger.warning(
+            "Ignoring %d duplicate chunk IDs while saving user %s.",
+            duplicate_count,
+            telegram_id,
+        )
+
+    ids = [all_ids[index] for index in unique_indices]
+    documents = [str(getattr(chunks[index], "text")) for index in unique_indices]
     metadatas = [
         {
-            "url": str(getattr(chunk, "url", "")),
-            "title": str(getattr(chunk, "title", "") or ""),
-            "depth": int(getattr(chunk, "depth", 0)),
-            "chunk_index": int(getattr(chunk, "chunk_index", 0)),
+            "url": str(getattr(chunks[index], "url", "")),
+            "title": str(getattr(chunks[index], "title", "") or ""),
+            "depth": int(getattr(chunks[index], "depth", 0)),
+            "chunk_index": int(getattr(chunks[index], "chunk_index", 0)),
             "telegram_id": int(telegram_id),
         }
-        for chunk in chunks
+        for index in unique_indices
     ]
-    vectors = embeddings.astype("float32").tolist()
+    vectors = embeddings[unique_indices].astype("float32").tolist()
 
     try:
         max_batch = client.get_max_batch_size()
@@ -175,18 +197,34 @@ def build_vector_store(
 
     collection = client.get_or_create_collection(name, metadata={ "site_id": site_id})
 
+    all_ids = [str(c["chunk_id"]) for c in chunks]
+    unique_indices = _unique_indices(all_ids)
+    duplicate_count = len(all_ids) - len(unique_indices)
+    if duplicate_count:
+        logger.warning(
+            "Ignoring %d duplicate chunk IDs while building site '%s'.",
+            duplicate_count,
+            site_id,
+        )
+
     collection.add(
-        ids=[c["chunk_id"] for c in chunks],
-        embeddings=embeddings.tolist(),
-        documents=[c["text"] for c in chunks],
+        ids=[all_ids[index] for index in unique_indices],
+        embeddings=embeddings[unique_indices].tolist(),
+        documents=[chunks[index]["text"] for index in unique_indices],
         metadatas=[
-            {"url": c["url"], "title": c.get("title", ""), "depth": c.get("depth", 0), "chunk_index": c.get("chunk_index", 0)}
-            for c in chunks
+            {
+                "url": chunks[index]["url"],
+                "title": chunks[index].get("title", ""),
+                "depth": chunks[index].get("depth", 0),
+                "chunk_index": chunks[index].get("chunk_index", 0),
+            }
+            for index in unique_indices
         ],
     )
 
-    logger.info("%d chunk در collection '%s' ذخیره شد.", len(chunks), name)
-    return len(chunks)
+    stored_count = len(unique_indices)
+    logger.info("%d chunk در collection '%s' ذخیره شد.", stored_count, name)
+    return stored_count
 
 
 def retrieve(

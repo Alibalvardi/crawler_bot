@@ -225,8 +225,6 @@ async def stop_pipeline_task(
     try:
         await task
     except asyncio.CancelledError:
-        # Wait until the pipeline has fully stopped.  In particular, this
-        # prevents a pending Chroma write from finishing after cleanup.
         pass
     except Exception:
         logger.exception("Background site pipeline failed while stopping")
@@ -280,12 +278,6 @@ async def wait_for_conversation_cleanup(telegram_id: int) -> None:
 async def run_uncancellable_thread(
     function: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
-    """Finish a worker-thread operation before propagating cancellation.
-
-    Cancelling an asyncio task does not cancel the underlying ``to_thread``
-    call.  This is important for Chroma writes: cleanup must not race a write
-    that is still running in the worker thread.
-    """
     worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     try:
         return await asyncio.shield(worker)
@@ -293,9 +285,6 @@ async def run_uncancellable_thread(
         try:
             await worker
         except BaseException:
-            # The worker may raise CancelledError itself after observing the
-            # pipeline cancellation event.  The outer cancellation is the
-            # expected result and should not produce a second error.
             pass
         raise
 
@@ -321,7 +310,7 @@ async def crawl_site(
         normalized_site = to_absolute_url(site)
         await reply_rtl(
             update,
-            "در حال crawl کردن سایت هستم؛ لطفاً کمی صبر کن...",
+            "در حال جستجو سایت هستم؛ لطفاً کمی صبر کن...",
             reply_markup=conversation_menu(),
         )
         result = await acrawl(
@@ -339,8 +328,8 @@ async def crawl_site(
         context.user_data["crawl_result"] = result
         await reply_rtl(
             update,
-            f"crawl انجام شد.\n"
-            f"تعداد صفحات با موفقیت کرال‌شده: {len(result.pages)}\n"
+            f"جستجو انجام شد.\n"
+            f"تعداد صفحات یافت شده : {len(result.pages)}\n"
             f"تعداد صفحات ناموفق: {len(result.errors)}",
             reply_markup=conversation_menu(),
         )
@@ -525,7 +514,6 @@ async def prepare_site_pipeline(
     config: dict[str, Any],
     cancel_event: threading.Event,
 ) -> bool:
-    """Run crawl, chunking, embedding and Chroma persistence in the background."""
     telegram_id = context.user_data["telegram_id"]
     try:
         async with get_user_pipeline_lock(telegram_id):
@@ -631,11 +619,13 @@ async def begin_conversation(
     clear_conversation(context)
     context.user_data["state"] = "waiting_for_site"
     context.user_data["history"] = []
+    config = user_config(context)
     await reply_rtl(
         update,
         "آدرس سایت را بفرست.\n"
-        "بعد از ارسال اولین query، crawl شروع می‌شود و نتیجه فقط در حافظه موقت "
-        "مکالمه نگه‌داری خواهد شد.",
+        f"سایت در {config['crawler_pages']} صفحه و عمق {config['crawler_depth']} "
+        "جستجو می‌شود.\n"
+        "بعد از ارسال اولین سوال، عملیات پاسخگویی بر اساس اطلاعات موجود شروع می‌شود.",
         reply_markup=conversation_menu(),
     )
 
@@ -700,7 +690,7 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if crawl_task is not None:
             await reply_rtl(
                 update,
-                "query دریافت شد؛ "
+                "سوال دریافت شد؛ "
                 "منتظر بمانید...",
                 reply_markup=conversation_menu(),
             )
@@ -800,7 +790,7 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await send_long_message(update, answer)
         await reply_rtl(
             update,
-            "query بعدی را بفرست یا «پایان مکالمه» را بزن.",
+            "سوال بعدی را بفرست یا «پایان مکالمه» را بزن.",
             reply_markup=conversation_menu(),
         )
     except Exception:
@@ -894,7 +884,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         clear_conversation(context)
         await reply_rtl(
             update,
-            "مکالمه پایان یافت و به منوی اصلی برگشتی. پاک‌سازی داده‌ها در پس‌زمینه انجام می‌شود.",
+            "مکالمه پایان یافت و به منوی اصلی برگشتی. پاک‌سازی داده‌ها در حال انجام است.",
             reply_markup=main_menu(),
         )
     elif state == "waiting_for_site":
@@ -914,7 +904,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await reply_rtl(
             update,
             "سایت دریافت شد و crawl، chunking، embedding و ذخیره‌سازی "
-            "در پس‌زمینه شروع شد. اولین query را بفرست؛ تا آماده‌شدن کامل "
+            "در پس‌زمینه شروع شد. اولین سوال را بفرست؛ تا آماده‌شدن کامل "
             "پایگاه دانش منتظر می‌مانم.",
             reply_markup=conversation_menu(),
         )
