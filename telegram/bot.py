@@ -76,6 +76,12 @@ VECTOR_DB_PATH = os.getenv(
     str(PROJECT_ROOT / "data" / "vector_db"),
 )
 
+DEPTH_SETTING = "تنظیم عمق خزنده"
+PAGES_SETTING = "تعداد صفحات خزنده"
+TOP_K_SETTING = "تعداد نتایج بازیابی"
+CONCURRENCY_SETTING = "تعداد درخواست‌های هم‌زمان خزنده"
+BATCH_SIZE_SETTING = "اندازه دستهٔ بردارسازی"
+
 EMBEDDING_MODELS = [
     item.strip()
     for item in os.getenv(
@@ -135,7 +141,19 @@ def main_menu() -> ReplyKeyboardMarkup:
         [
             ["شروع مکالمه"],
             ["مدل های embedding", "مدل های generation"],
-            ["انتخاب عمق crawler", "تعداد صفحات crawler"],
+            ["تنظیمات"],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def settings_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [DEPTH_SETTING, PAGES_SETTING],
+            [TOP_K_SETTING, CONCURRENCY_SETTING],
+            [BATCH_SIZE_SETTING],
+            ["بازگشت به منوی اصلی"],
         ],
         resize_keyboard=True,
     )
@@ -161,6 +179,9 @@ def default_settings() -> dict[str, Any]:
         "generation_model": DEFAULT_GENERATION_MODEL,
         "crawler_depth": 5,
         "crawler_pages": 100,
+        "retrieve_top_k": RETRIEVE_TOP_K,
+        "crawl_concurrency": CRAWL_CONCURRENCY,
+        "embed_batch_size": EMBED_BATCH_SIZE,
     }
 
 
@@ -317,7 +338,7 @@ async def crawl_site(
             normalized_site,
             max_pages=int(config["crawler_pages"]),
             max_depth=int(config["crawler_depth"]),
-            concurrency=CRAWL_CONCURRENCY,
+            concurrency=int(config["crawl_concurrency"]),
             delay=CRAWL_DELAY,
             timeout=CRAWL_TIMEOUT,
             retries=CRAWL_RETRIES,
@@ -360,6 +381,7 @@ async def crawl_site(
 def embed_chunks_in_memory(
     chunks: list[Chunk],
     embedding_model: str,
+    batch_size: int,
     progress_callback: Callable[[int, int], None] | None = None,
     cancel_check: Callable[[], None] | None = None,
 ) -> Any:
@@ -368,7 +390,7 @@ def embed_chunks_in_memory(
         return embed_texts(
             texts,
             backend="local",
-            batch_size=EMBED_BATCH_SIZE,
+            batch_size=batch_size,
             show_progress=True,
             progress_callback=progress_callback,
             cancel_check=cancel_check,
@@ -377,7 +399,7 @@ def embed_chunks_in_memory(
         texts,
         backend="openai",
         model=embedding_model,
-        batch_size=EMBED_BATCH_SIZE,
+        batch_size=batch_size,
         show_progress=True,
         progress_callback=progress_callback,
         cancel_check=cancel_check,
@@ -470,6 +492,7 @@ async def prepare_knowledge_base(
         embed_chunks_in_memory,
         chunks,
         embedding_model,
+        int(config["embed_batch_size"]),
         on_embedding_progress,
         cancel_check,
     )
@@ -659,24 +682,53 @@ async def ask_generation_models(
 async def ask_depth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     selected = user_config(context)["crawler_depth"]
     context.user_data["state"] = "waiting_for_depth"
+    context.user_data.pop("numeric_setting", None)
     await reply_rtl(
         update,
-        f"عمق crawler را به‌صورت عدد وارد کن.\n"
+        f"عمق خزنده را به‌صورت عدد وارد کن.\n"
         f"مقدار فعلی: {selected}\n"
         "حداقل: 1 | حداکثر: 10",
-        reply_markup=main_menu(),
+        reply_markup=settings_menu(),
     )
 
 
 async def ask_pages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     selected = user_config(context)["crawler_pages"]
     context.user_data["state"] = "waiting_for_pages"
+    context.user_data.pop("numeric_setting", None)
     await reply_rtl(
         update,
-        f"تعداد صفحات crawler را به‌صورت عدد وارد کن.\n"
+        f"تعداد صفحات خزنده را به‌صورت عدد وارد کن.\n"
         f"مقدار فعلی: {selected}\n"
         "حداقل: 1 | حداکثر: 1000",
-        reply_markup=main_menu(),
+        reply_markup=settings_menu(),
+    )
+
+
+async def ask_numeric_setting(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    setting_key: str,
+    state: str,
+    title: str,
+    minimum: int,
+    maximum: int,
+) -> None:
+    selected = user_config(context)[setting_key]
+    context.user_data["state"] = state
+    context.user_data["numeric_setting"] = {
+        "key": setting_key,
+        "title": title,
+        "minimum": minimum,
+        "maximum": maximum,
+    }
+    await reply_rtl(
+        update,
+        f"{title} را به‌صورت عدد وارد کن.\n"
+        f"مقدار فعلی: {selected}\n"
+        f"حداقل: {minimum} | حداکثر: {maximum}",
+        reply_markup=settings_menu(),
     )
 
 
@@ -768,13 +820,14 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             embed_chunks_in_memory,
             [Chunk("query", site, "", 0, 0, query, len(query))],
             str(config["embedding_model"]),
+            int(config["embed_batch_size"]),
         )
         async with get_user_vector_lock(telegram_id):
             hits = await asyncio.to_thread(
                 retrieve_user_chunks,
                 telegram_id,
                 query_embedding[0],
-                top_k=RETRIEVE_TOP_K,
+                top_k=int(config["retrieve_top_k"]),
                 persist_dir=VECTOR_DB_PATH,
             )
         log_retrieved_chunks(query, hits, query_number)
@@ -815,29 +868,67 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if text == "شروع مکالمه":
         await begin_conversation(update, context)
+    elif text == "تنظیمات":
+        context.user_data["state"] = "idle"
+        context.user_data.pop("numeric_setting", None)
+        await reply_rtl(update, "تنظیمات:", reply_markup=settings_menu())
+    elif text == "بازگشت به منوی اصلی":
+        context.user_data["state"] = "idle"
+        context.user_data.pop("numeric_setting", None)
+        await reply_rtl(update, "منوی اصلی:", reply_markup=main_menu())
     elif text == "مدل های embedding":
         await ask_embedding_models(update, context)
     elif text == "مدل های generation":
         await ask_generation_models(update, context)
-    elif text == "انتخاب عمق crawler":
+    elif text == DEPTH_SETTING:
         await ask_depth(update, context)
-    elif text == "تعداد صفحات crawler":
+    elif text == PAGES_SETTING:
         await ask_pages(update, context)
+    elif text == TOP_K_SETTING:
+        await ask_numeric_setting(
+            update,
+            context,
+            setting_key="retrieve_top_k",
+            state="waiting_for_retrieve_top_k",
+            title=TOP_K_SETTING,
+            minimum=1,
+            maximum=50,
+        )
+    elif text == CONCURRENCY_SETTING:
+        await ask_numeric_setting(
+            update,
+            context,
+            setting_key="crawl_concurrency",
+            state="waiting_for_crawl_concurrency",
+            title=CONCURRENCY_SETTING,
+            minimum=1,
+            maximum=32,
+        )
+    elif text == BATCH_SIZE_SETTING:
+        await ask_numeric_setting(
+            update,
+            context,
+            setting_key="embed_batch_size",
+            state="waiting_for_embed_batch_size",
+            title=BATCH_SIZE_SETTING,
+            minimum=1,
+            maximum=256,
+        )
     elif state == "waiting_for_depth":
         try:
             depth = int(text)
         except ValueError:
             await reply_rtl(
                 update,
-                "عمق باید یک عدد صحیح باشد. دوباره وارد کن (۱ تا ۱۰):",
-                reply_markup=main_menu(),
+                "عمق خزنده باید یک عدد صحیح باشد. دوباره وارد کن (۱ تا ۱۰):",
+                reply_markup=settings_menu(),
             )
             return
         if not 1 <= depth <= 10:
             await reply_rtl(
                 update,
                 "عمق واردشده معتبر نیست. عددی بین ۱ تا ۱۰ وارد کن:",
-                reply_markup=main_menu(),
+                reply_markup=settings_menu(),
             )
             return
         database.update_setting(
@@ -846,8 +937,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["state"] = "idle"
         await reply_rtl(
             update,
-            f"عمق crawler روی {depth} تنظیم شد.",
-            reply_markup=main_menu(),
+            f"عمق خزنده روی {depth} تنظیم شد.",
+            reply_markup=settings_menu(),
         )
     elif state == "waiting_for_pages":
         try:
@@ -855,15 +946,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except ValueError:
             await reply_rtl(
                 update,
-                "تعداد صفحات باید یک عدد صحیح باشد. دوباره وارد کن (۱ تا ۱۰۰۰):",
-                reply_markup=main_menu(),
+                "تعداد صفحات خزنده باید یک عدد صحیح باشد. دوباره وارد کن (۱ تا ۱۰۰۰):",
+                reply_markup=settings_menu(),
             )
             return
         if not 1 <= pages <= 1000:
             await reply_rtl(
                 update,
                 "تعداد صفحات واردشده معتبر نیست. عددی بین ۱ تا ۱۰۰۰ وارد کن:",
-                reply_markup=main_menu(),
+                reply_markup=settings_menu(),
             )
             return
         database.update_setting(
@@ -872,8 +963,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["state"] = "idle"
         await reply_rtl(
             update,
-            f"تعداد صفحات crawler روی {pages} تنظیم شد.",
-            reply_markup=main_menu(),
+            f"تعداد صفحات خزنده روی {pages} تنظیم شد.",
+            reply_markup=settings_menu(),
+        )
+    elif state in {
+        "waiting_for_retrieve_top_k",
+        "waiting_for_crawl_concurrency",
+        "waiting_for_embed_batch_size",
+    }:
+        numeric_setting = context.user_data.get("numeric_setting")
+        if not numeric_setting:
+            context.user_data["state"] = "idle"
+            await reply_rtl(update, "لطفاً دوباره از منوی تنظیمات گزینه را انتخاب کن.", reply_markup=settings_menu())
+            return
+        try:
+            value = int(text)
+        except ValueError:
+            await reply_rtl(
+                update,
+                f"{numeric_setting['title']} باید یک عدد صحیح باشد؛ دوباره وارد کن:",
+                reply_markup=settings_menu(),
+            )
+            return
+        minimum = numeric_setting["minimum"]
+        maximum = numeric_setting["maximum"]
+        if not minimum <= value <= maximum:
+            await reply_rtl(
+                update,
+                f"مقدار واردشده معتبر نیست. عددی بین {minimum} تا {maximum} وارد کن:",
+                reply_markup=settings_menu(),
+            )
+            return
+        database.update_setting(
+            context.user_data["telegram_id"], numeric_setting["key"], value
+        )
+        context.user_data["state"] = "idle"
+        context.user_data.pop("numeric_setting", None)
+        await reply_rtl(
+            update,
+            f"{numeric_setting['title']} روی {value} تنظیم شد.",
+            reply_markup=settings_menu(),
         )
     elif text == "پایان مکالمه":
         pipeline_task = context.user_data.pop("crawl_task", None)

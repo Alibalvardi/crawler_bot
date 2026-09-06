@@ -46,12 +46,27 @@ class Database:
                     generation_model TEXT NOT NULL,
                     crawler_depth INTEGER NOT NULL DEFAULT 2,
                     crawler_pages INTEGER NOT NULL DEFAULT 5,
+                    retrieve_top_k INTEGER NOT NULL DEFAULT 10,
+                    crawl_concurrency INTEGER NOT NULL DEFAULT 8,
+                    embed_batch_size INTEGER NOT NULL DEFAULT 32,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
                         ON DELETE CASCADE
                 );
                 """
             )
+            existing_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(user_settings)")
+            }
+            migrations = {
+                "retrieve_top_k": "ALTER TABLE user_settings ADD COLUMN retrieve_top_k INTEGER NOT NULL DEFAULT 10",
+                "crawl_concurrency": "ALTER TABLE user_settings ADD COLUMN crawl_concurrency INTEGER NOT NULL DEFAULT 8",
+                "embed_batch_size": "ALTER TABLE user_settings ADD COLUMN embed_batch_size INTEGER NOT NULL DEFAULT 32",
+            }
+            for column, statement in migrations.items():
+                if column not in existing_columns:
+                    connection.execute(statement)
 
     def upsert_user(self, telegram_user: Any) -> None:
         now = utc_now()
@@ -92,8 +107,9 @@ class Database:
                     """
                     INSERT INTO user_settings
                         (telegram_id, embedding_model, generation_model,
-                         crawler_depth, crawler_pages, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                         crawler_depth, crawler_pages, retrieve_top_k,
+                         crawl_concurrency, embed_batch_size, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         telegram_id,
@@ -101,6 +117,9 @@ class Database:
                         defaults["generation_model"],
                         defaults["crawler_depth"],
                         defaults["crawler_pages"],
+                        defaults["retrieve_top_k"],
+                        defaults["crawl_concurrency"],
+                        defaults["embed_batch_size"],
                         now,
                     ),
                 )
@@ -111,6 +130,9 @@ class Database:
                 "generation_model": row["generation_model"],
                 "crawler_depth": row["crawler_depth"],
                 "crawler_pages": row["crawler_pages"],
+                "retrieve_top_k": row["retrieve_top_k"],
+                "crawl_concurrency": row["crawl_concurrency"],
+                "embed_batch_size": row["embed_batch_size"],
             }
 
     def update_setting(self, telegram_id: int, key: str, value: Any) -> None:
@@ -119,6 +141,9 @@ class Database:
             "generation_model",
             "crawler_depth",
             "crawler_pages",
+            "retrieve_top_k",
+            "crawl_concurrency",
+            "embed_batch_size",
         }
         if key not in allowed:
             raise ValueError(f"Unsupported setting: {key}")
