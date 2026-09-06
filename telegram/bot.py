@@ -70,7 +70,7 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 MIN_CHUNK_CHARS = int(os.getenv("MIN_CHUNK_CHARS", "30"))
 EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "32"))
-RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "5"))
+RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "10"))
 VECTOR_DB_PATH = os.getenv(
     "VECTOR_DB_PATH",
     str(PROJECT_ROOT / "data" / "vector_db"),
@@ -334,20 +334,24 @@ async def crawl_site(
             reply_markup=conversation_menu(),
         )
         if not result.pages:
+            context.user_data["state"] = "waiting_for_site"
+            context.user_data.pop("embeddings", None)
+            context.user_data.pop("crawl_result", None)
             await reply_rtl(
                 update,
-                "هیچ صفحه‌ای با موفقیت دریافت نشد؛ query بعدی را بفرست یا "
-                "مکالمه را پایان بده.",
+                "هیچ صفحه‌ای با موفقیت دریافت نشد؛ لطفاً آدرس سایت را مجدد "
+                "وارد کن یا «پایان مکالمه» را انتخاب کن.",
                 reply_markup=conversation_menu(),
             )
             return False
         return True
     except Exception:
         logger.exception("Crawling failed for Telegram user %s", update.effective_user.id)
+        context.user_data["state"] = "waiting_for_site"
         await reply_rtl(
             update,
-            "در crawl کردن سایت خطایی رخ داد. آدرس سایت، SSL یا تنظیمات crawler "
-            "را بررسی کن.",
+            "دریافت سایت ناموفق بود؛ لطفاً آدرس سایت را مجدد وارد کن یا "
+            "«پایان مکالمه» را انتخاب کن.",
             reply_markup=conversation_menu(),
         )
         return False
