@@ -5,8 +5,11 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import (
@@ -55,7 +58,7 @@ GENERATION_BASE_URL = os.getenv(
     "GENERATION_BASE_URL",
     DEFAULT_GENERATION_BASE_URL,
 )
-DEFAULT_GENERATION_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+DEFAULT_GENERATION_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 CRAWL_CONCURRENCY = int(os.getenv("CRAWL_CONCURRENCY", "8"))
 CRAWL_DELAY = float(os.getenv("CRAWL_DELAY", "0.1"))
@@ -132,6 +135,45 @@ def rtl_text(text: str) -> str:
     return "".join(lines)
 
 
+def format_saved_at_jalali(value: str) -> str:
+    """Keep ISO/UTC timestamps in storage, but display them as Jalali."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(ZoneInfo("Asia/Tehran"))
+        gy, gm, gd = parsed.year, parsed.month, parsed.day
+        g_days = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+        if gy > 1600:
+            jy = 979
+            gy -= 1600
+        else:
+            jy = 0
+            gy -= 621
+        gy2 = gy + 1 if gm > 2 else gy
+        days = (
+            + 365 * gy
+            + (gy2 + 3) // 4
+            - (gy2 + 99) // 100
+            + (gy2 + 399) // 400
+            - 80
+            + gd
+            + g_days[gm - 1]
+        )
+        jy += 33 * (days // 12053)
+        days %= 12053
+        jy += 4 * (days // 1461)
+        days %= 1461
+        if days > 365:
+            jy += (days - 1) // 365
+            days = (days - 1) % 365
+        jm = 1 + days // 31 if days < 186 else 7 + (days - 186) // 30
+        jd = 1 + (days % 31 if days < 186 else (days - 186) % 30)
+        return f"{jy:04d}/{jm:02d}/{jd:02d} {parsed:%H:%M}"
+    except (TypeError, ValueError, IndexError):
+        return str(value)[:16].replace("T", " ")
+
+
 async def reply_rtl(update: Update, text: str, **kwargs: Any) -> Any:
     return await update.message.reply_text(rtl_text(text), **kwargs)
 
@@ -140,6 +182,7 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             ["شروع مکالمه"],
+            ["مکالمه‌های قبلی"],
             ["مدل های embedding", "مدل های generation"],
             ["تنظیمات"],
         ],
@@ -160,7 +203,13 @@ def settings_menu() -> ReplyKeyboardMarkup:
 
 
 def conversation_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([["پایان مکالمه"]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        [["ذخیره و پایان مکالمه", "پایان مکالمه"]], resize_keyboard=True
+    )
+
+
+def saved_conversation_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([["خروج از مکالمه قبلی"]], resize_keyboard=True)
 
 
 def model_keyboard(kind: str) -> InlineKeyboardMarkup:
@@ -209,6 +258,9 @@ def clear_conversation(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("crawl_chunks", None)
     context.user_data.pop("embeddings", None)
     context.user_data.pop("query_count", None)
+    context.user_data.pop("conversation_id", None)
+    context.user_data.pop("collection_name", None)
+    context.user_data.pop("active_embedding_model", None)
 
 
 def raise_if_cancelled(cancel_event: threading.Event) -> None:
@@ -255,10 +307,11 @@ async def cleanup_conversation_resources(
     telegram_id: int,
     pipeline_task: asyncio.Task | None,
     cancel_event: threading.Event | None,
+    collection_name: str | None = None,
 ) -> None:
     try:
         await stop_pipeline_task(pipeline_task, cancel_event)
-        await delete_user_vectors(telegram_id)
+        await delete_user_vectors(telegram_id, collection_name=collection_name)
         logger.info("Conversation data cleanup completed for user %s", telegram_id)
     except Exception:
         logger.exception("Conversation data cleanup failed for user %s", telegram_id)
@@ -268,6 +321,7 @@ def schedule_conversation_cleanup(
     telegram_id: int,
     pipeline_task: asyncio.Task | None,
     cancel_event: threading.Event | None,
+    collection_name: str | None = None,
 ) -> None:
     previous = user_cleanup_tasks.get(telegram_id)
 
@@ -278,6 +332,7 @@ def schedule_conversation_cleanup(
             telegram_id,
             pipeline_task,
             cancel_event,
+            collection_name,
         )
 
     task = asyncio.create_task(cleanup_after_previous())
@@ -310,13 +365,26 @@ async def run_uncancellable_thread(
         raise
 
 
-async def delete_user_vectors(telegram_id: int) -> None:
+async def delete_user_vectors(
+    telegram_id: int, collection_name: str | None = None
+) -> None:
     async with get_user_vector_lock(telegram_id):
         await asyncio.to_thread(
             delete_user_collection,
             telegram_id,
+            collection_name=collection_name,
             persist_dir=VECTOR_DB_PATH,
         )
+
+
+async def discard_active_unsaved_collection(
+    telegram_id: int, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if context.user_data.get("state") == "historical_query":
+        return
+    collection_name = context.user_data.get("collection_name")
+    if collection_name:
+        await delete_user_vectors(telegram_id, collection_name=collection_name)
 
 
 
@@ -523,6 +591,7 @@ async def prepare_knowledge_base(
             telegram_id,
             chunks,
             embeddings,
+            collection_name=context.user_data.get("collection_name"),
             persist_dir=VECTOR_DB_PATH,
         )
     await reply_rtl(
@@ -618,7 +687,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     telegram_id = ensure_user(update, context)
     await cancel_background_crawl(context)
     await wait_for_conversation_cleanup(telegram_id)
-    await delete_user_vectors(telegram_id)
+    await discard_active_unsaved_collection(telegram_id, context)
     clear_conversation(context)
     await reply_rtl(
         update,
@@ -631,7 +700,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     telegram_id = ensure_user(update, context)
     await cancel_background_crawl(context)
     await wait_for_conversation_cleanup(telegram_id)
-    await delete_user_vectors(telegram_id)
+    await discard_active_unsaved_collection(telegram_id, context)
     clear_conversation(context)
     await reply_rtl(update, "منوی اصلی:", reply_markup=main_menu())
 
@@ -642,8 +711,16 @@ async def begin_conversation(
     telegram_id = ensure_user(update, context)
     await cancel_background_crawl(context)
     await wait_for_conversation_cleanup(telegram_id)
-    await delete_user_vectors(telegram_id)
+    await discard_active_unsaved_collection(telegram_id, context)
     clear_conversation(context)
+    conversation_id = uuid4().hex
+    context.user_data["conversation_id"] = conversation_id
+    context.user_data["collection_name"] = (
+        f"user_{telegram_id}_conversation_{conversation_id}"
+    )
+    context.user_data["active_embedding_model"] = user_config(context)[
+        "embedding_model"
+    ]
     context.user_data["state"] = "waiting_for_site"
     context.user_data["history"] = []
     config = user_config(context)
@@ -655,6 +732,90 @@ async def begin_conversation(
         "بعد از ارسال اولین سوال، عملیات پاسخگویی بر اساس اطلاعات موجود شروع می‌شود.",
         reply_markup=conversation_menu(),
     )
+
+
+async def show_saved_conversations(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    telegram_id = ensure_user(update, context)
+    conversations = database.list_saved_conversations(telegram_id)
+    if not conversations:
+        await reply_rtl(
+            update,
+            "هنوز مکالمه‌ی ذخیره‌شده‌ای نداری.",
+            reply_markup=main_menu(),
+        )
+        return
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{item['title']} | {format_saved_at_jalali(item['created_at'])}",
+                callback_data=f"conversation:{item['conversation_id']}",
+            )
+        ]
+        for item in conversations
+    ]
+    await reply_rtl(
+        update,
+        "یکی از سه مکالمه‌ی اخیر را انتخاب کن:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def save_current_conversation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    telegram_id = context.user_data["telegram_id"]
+    pipeline_task = context.user_data.get("crawl_task")
+    if pipeline_task is not None:
+        # هنگام crawl یا embedding چیزی برای ذخیره‌ی مکالمه آماده نیست؛
+        # نباید با انتظار برای task، کاربر وارد روند ذخیره‌سازی شود.
+        if not pipeline_task.done():
+            return False
+        try:
+            ready = await asyncio.shield(pipeline_task)
+        except asyncio.CancelledError:
+            logger.warning(
+                "Conversation save cancelled while waiting for pipeline, user=%s",
+                telegram_id,
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "Could not finish pipeline before saving conversation, user=%s",
+                telegram_id,
+            )
+            return False
+        context.user_data.pop("crawl_task", None)
+        if not ready:
+            return False
+
+    collection_name = context.user_data.get("collection_name")
+    conversation_id = context.user_data.get("conversation_id")
+    site = context.user_data.get("site")
+    if (
+        not collection_name
+        or not conversation_id
+        or not site
+        or "embeddings" not in context.user_data
+    ):
+        return False
+
+    database.save_conversation(
+        telegram_id,
+        conversation_id,
+        collection_name,
+        site,
+        site,
+        str(context.user_data.get("active_embedding_model", "local")),
+    )
+    stale = database.prune_saved_conversations(telegram_id)
+    for item in stale:
+        await delete_user_vectors(
+            telegram_id,
+            collection_name=item["collection_name"],
+        )
+    return True
 
 
 async def ask_embedding_models(
@@ -736,6 +897,12 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     telegram_id = ensure_user(update, context)
     config = user_config(context)
     site = context.user_data.get("site", "")
+    collection_name = context.user_data.get("collection_name")
+    embedding_model = context.user_data.get(
+        "active_embedding_model", config["embedding_model"]
+    )
+    is_historical = context.user_data.get("state") == "historical_query"
+    query_reply_markup = saved_conversation_menu() if is_historical else conversation_menu()
     history: list[dict[str, str]] = context.user_data.setdefault("history", [])
     query = update.message.text.strip()
     query_number = int(context.user_data.get("query_count", 0)) + 1
@@ -748,7 +915,7 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 update,
                 "سوال دریافت شد؛ "
                 "منتظر بمانید...",
-                reply_markup=conversation_menu(),
+                reply_markup=query_reply_markup,
             )
             try:
                 pipeline_ready = await crawl_task
@@ -762,19 +929,19 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await reply_rtl(
                     update,
                     "آماده‌سازی سایت کامل نشد؛ لطفاً یک مکالمه جدید شروع کن.",
-                    reply_markup=conversation_menu(),
+                    reply_markup=query_reply_markup,
                 )
                 return
             context.user_data.pop("crawl_task", None)
             if not pipeline_ready:
                 return
             site = context.user_data["site"]
-        elif "embeddings" not in context.user_data:
+        elif not is_historical and "embeddings" not in context.user_data:
             if not site:
                 await reply_rtl(
                     update,
                     "ابتدا باید آدرس سایت را بفرستی.",
-                    reply_markup=conversation_menu(),
+                    reply_markup=query_reply_markup,
                 )
                 return
             cancel_event = context.user_data.setdefault(
@@ -791,7 +958,7 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
             site = context.user_data["site"]
 
-        if "embeddings" not in context.user_data:
+        if not is_historical and "embeddings" not in context.user_data:
             cancel_event = context.user_data.setdefault(
                 "pipeline_cancel_event",
                 threading.Event(),
@@ -819,7 +986,7 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         query_embedding = await asyncio.to_thread(
             embed_chunks_in_memory,
             [Chunk("query", site, "", 0, 0, query, len(query))],
-            str(config["embedding_model"]),
+            str(embedding_model),
             int(config["embed_batch_size"]),
         )
         async with get_user_vector_lock(telegram_id):
@@ -828,6 +995,7 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 telegram_id,
                 query_embedding[0],
                 top_k=int(config["retrieve_top_k"]),
+                collection_name=collection_name,
                 persist_dir=VECTOR_DB_PATH,
             )
         log_retrieved_chunks(query, hits, query_number)
@@ -847,15 +1015,19 @@ async def answer_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await send_long_message(update, answer)
         await reply_rtl(
             update,
-            "سوال بعدی را بفرست یا «پایان مکالمه» را بزن.",
-            reply_markup=conversation_menu(),
+            (
+                "سوال بعدی را بفرست یا «خروج از مکالمه قبلی» را بزن."
+                if is_historical
+                else "سوال بعدی را بفرست یا «پایان مکالمه» را بزن."
+            ),
+            reply_markup=query_reply_markup,
         )
     except Exception:
         logger.exception("Generation failed for Telegram user %s", telegram_id)
         await reply_rtl(
             update,
             "در ارتباط با مدل مشکلی پیش آمد. کلید API و مدل را بررسی کن.",
-            reply_markup=conversation_menu(),
+            reply_markup=query_reply_markup,
         )
 
 
@@ -868,6 +1040,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if text == "شروع مکالمه":
         await begin_conversation(update, context)
+    elif text == "مکالمه‌های قبلی":
+        await show_saved_conversations(update, context)
     elif text == "تنظیمات":
         context.user_data["state"] = "idle"
         context.user_data.pop("numeric_setting", None)
@@ -1004,15 +1178,54 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"{numeric_setting['title']} روی {value} تنظیم شد.",
             reply_markup=settings_menu(),
         )
+    elif text == "ذخیره و پایان مکالمه":
+        try:
+            saved = await save_current_conversation(update, context)
+        except Exception:
+            logger.exception(
+                "Could not save conversation for user %s",
+                context.user_data.get("telegram_id"),
+            )
+            await reply_rtl(
+                update,
+                "ذخیره‌سازی مکالمه با خطا مواجه شد؛ اطلاعات مکالمه حذف نشده است.",
+                reply_markup=conversation_menu(),
+            )
+            return
+        if not saved:
+            await reply_rtl(
+                update,
+                "داده‌ای برای ذخیره وجود ندارد؛ ابتدا صبر کن تا آماده‌سازی سایت کامل شود.",
+                reply_markup=conversation_menu(),
+            )
+            return
+        context.user_data.pop("pipeline_cancel_event", None)
+        context.user_data.pop("crawl_task", None)
+        clear_conversation(context)
+        await reply_rtl(
+            update,
+            "مکالمه ذخیره شد و به منوی اصلی برگشتی.",
+            reply_markup=main_menu(),
+        )
     elif text == "پایان مکالمه":
+        if state == "historical_query":
+            clear_conversation(context)
+            await reply_rtl(
+                update,
+                "از مکالمه‌ی ذخیره‌شده خارج شدی؛ اطلاعات آن همچنان محفوظ است.",
+                reply_markup=main_menu(),
+            )
+            return
         pipeline_task = context.user_data.pop("crawl_task", None)
         cancel_event = context.user_data.pop("pipeline_cancel_event", None)
+        collection_name = context.user_data.get("collection_name")
         if cancel_event is not None:
             cancel_event.set()
         schedule_conversation_cleanup(
             context.user_data["telegram_id"],
             pipeline_task,
             cancel_event,
+            collection_name,
         )
         clear_conversation(context)
         await reply_rtl(
@@ -1020,6 +1233,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "مکالمه پایان یافت و به منوی اصلی برگشتی. پاک‌سازی داده‌ها در حال انجام است.",
             reply_markup=main_menu(),
         )
+    elif text == "خروج از مکالمه قبلی":
+        clear_conversation(context)
+        await reply_rtl(update, "به منوی اصلی برگشتی.", reply_markup=main_menu())
     elif state == "waiting_for_site":
         context.user_data["site"] = text
         context.user_data["state"] = "waiting_for_query"
@@ -1041,7 +1257,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "پایگاه دانش منتظر می‌مانم.",
             reply_markup=conversation_menu(),
         )
-    elif state == "waiting_for_query":
+    elif state in {"waiting_for_query", "historical_query"}:
         await answer_query(update, context)
     else:
         await reply_rtl(
@@ -1074,6 +1290,39 @@ async def handle_callback(
         database.update_setting(telegram_id, key, int(value))
         label = "عمق crawler" if kind == "depth" else "تعداد صفحات crawler"
         await query.edit_message_text(rtl_text(f"{label} روی {value} تنظیم شد."))
+
+    elif data.startswith("conversation:"):
+        conversation_id = data.split(":", 1)[1]
+        conversation = database.get_saved_conversation(
+            telegram_id, conversation_id
+        )
+        if conversation is None:
+            await query.edit_message_text(rtl_text("این مکالمه دیگر وجود ندارد."))
+            return
+        await cancel_background_crawl(context)
+        await wait_for_conversation_cleanup(telegram_id)
+        clear_conversation(context)
+        context.user_data["state"] = "historical_query"
+        context.user_data["site"] = conversation["site"]
+        context.user_data["conversation_id"] = conversation["conversation_id"]
+        context.user_data["collection_name"] = conversation["collection_name"]
+        context.user_data["active_embedding_model"] = conversation[
+            "embedding_model"
+        ]
+        context.user_data["history"] = []
+        context.user_data["query_count"] = 0
+        await query.edit_message_text(
+            rtl_text(
+                f"مکالمه انتخاب شد.\nسایت: {conversation['site']}\n"
+                "سؤالت را بفرست."
+            )
+        )
+        await context.bot.send_message(
+            chat_id=telegram_id,
+            text=rtl_text("در حال استفاده از دیتای همین مکالمه هستی."),
+            reply_markup=saved_conversation_menu(),
+        )
+        return
 
     await context.bot.send_message(
         chat_id=telegram_id,

@@ -45,6 +45,7 @@ def save_user_chunks(
     chunks: list[object],
     embeddings: np.ndarray,
     *,
+    collection_name: str | None = None,
     persist_dir: str | Path = DEFAULT_PERSIST_DIR,
 ) -> int:
     """Replace the user's temporary collection with chunk text + vectors."""
@@ -56,7 +57,7 @@ def save_user_chunks(
         raise ValueError("تعداد chunkها و embeddingها برابر نیست.")
 
     client = get_client(persist_dir)
-    name = _user_collection_name(telegram_id)
+    name = collection_name or _user_collection_name(telegram_id)
     try:
         client.delete_collection(name)
     except Exception:
@@ -111,6 +112,7 @@ def retrieve_user_chunks(
     telegram_id: int,
     query_embedding: np.ndarray,
     *,
+    collection_name: str | None = None,
     top_k: int = 5,
     persist_dir: str | Path = DEFAULT_PERSIST_DIR,
     distance_threshold: float | None = None,
@@ -119,7 +121,9 @@ def retrieve_user_chunks(
         raise ValueError("top_k باید بزرگ‌تر از صفر باشد.")
     vector = np.asarray(query_embedding, dtype="float32").reshape(-1).tolist()
     client = get_client(persist_dir)
-    collection = client.get_collection(_user_collection_name(telegram_id))
+    collection = client.get_collection(
+        collection_name or _user_collection_name(telegram_id)
+    )
     result = collection.query(
         query_embeddings=[vector],
         n_results=min(top_k, collection.count()),
@@ -144,11 +148,12 @@ def retrieve_user_chunks(
 def delete_user_collection(
     telegram_id: int,
     *,
+    collection_name: str | None = None,
     persist_dir: str | Path = DEFAULT_PERSIST_DIR,
 ) -> None:
     client = get_client(persist_dir)
     try:
-        client.delete_collection(_user_collection_name(telegram_id))
+        client.delete_collection(collection_name or _user_collection_name(telegram_id))
     except Exception:
         pass
 

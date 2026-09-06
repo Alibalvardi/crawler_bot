@@ -53,6 +53,21 @@ class Database:
                     FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
                         ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS saved_conversations (
+                    conversation_id TEXT PRIMARY KEY,
+                    telegram_id INTEGER NOT NULL,
+                    collection_name TEXT NOT NULL UNIQUE,
+                    site TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    embedding_model TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_saved_conversations_user
+                    ON saved_conversations(telegram_id, created_at DESC);
                 """
             )
             existing_columns = {
@@ -154,3 +169,87 @@ class Database:
                 "WHERE telegram_id = ?",
                 (value, utc_now(), telegram_id),
             )
+
+    def save_conversation(
+        self,
+        telegram_id: int,
+        conversation_id: str,
+        collection_name: str,
+        site: str,
+        title: str,
+        embedding_model: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO saved_conversations
+                    (conversation_id, telegram_id, collection_name, site,
+                     title, embedding_model, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conversation_id,
+                    telegram_id,
+                    collection_name,
+                    site,
+                    title,
+                    embedding_model,
+                    utc_now(),
+                ),
+            )
+
+    def list_saved_conversations(self, telegram_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT conversation_id, telegram_id, collection_name, site,
+                       title, embedding_model, created_at
+                FROM saved_conversations
+                WHERE telegram_id = ?
+                ORDER BY created_at DESC
+                LIMIT 3
+                """,
+                (telegram_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_saved_conversation(
+        self, telegram_id: int, conversation_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT conversation_id, telegram_id, collection_name, site,
+                       title, embedding_model, created_at
+                FROM saved_conversations
+                WHERE telegram_id = ? AND conversation_id = ?
+                """,
+                (telegram_id, conversation_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def delete_saved_conversation(self, conversation_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM saved_conversations WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+
+    def prune_saved_conversations(self, telegram_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT conversation_id, collection_name
+                FROM saved_conversations
+                WHERE telegram_id = ?
+                ORDER BY created_at DESC
+                """,
+                (telegram_id,),
+            ).fetchall()
+            stale = [dict(row) for row in rows[3:]]
+            for row in stale:
+                connection.execute(
+                    "DELETE FROM saved_conversations WHERE conversation_id = ?",
+                    (row["conversation_id"],),
+                )
+            return stale
