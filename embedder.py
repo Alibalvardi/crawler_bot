@@ -88,7 +88,7 @@ def _embed_texts_local(
         cancel_check: CancelCheck | None = None,
 ) -> np.ndarray:
     logger.info("loading local embedding model: %s", DEFAULT_LOCAL_MODEL)
-    model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=True,device="cuda" if _cuda_available() else "cpu")
+    model = SentenceTransformer(DEFAULT_LOCAL_MODEL,local_files_only=False,device="cuda" if _cuda_available() else "cpu")
 
     logger.info("embedding %d texts locally (batch_size=%d)", len(texts), batch_size)
     all_embeddings = []
